@@ -21,6 +21,12 @@ concurrency:
 
 jobs:
   prepare:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.head.repo.full_name == 'depeng1994/vllm-ascend' &&
+       github.event.pull_request.user.login == 'depeng1994' &&
+       !github.event.pull_request.draft)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -70,7 +76,7 @@ jobs:
         run: python3 .github/scripts/lite_actions/wait_result.py
 
   result:
-    if: always()
+    if: always() && needs.prepare.result != 'skipped'
     needs: [prepare, smoke]
     runs-on: ubuntu-latest
     name: Lite-Actions-Smoke
