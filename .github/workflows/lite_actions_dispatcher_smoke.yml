@@ -1,0 +1,81 @@
+name: Dispatcher-Smoke
+run-name: ${{ github.event_name == 'pull_request_target' && format('lite-a5-pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) || 'lite-a5-manual' }}
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
+  workflow_dispatch:
+    inputs:
+      test_cases:
+        description: 'JSON fixed test_id selectors; empty runs A5 8P'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: lite-a5-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      sha: ${{ steps.plan.outputs.sha }}
+      plan_digest: ${{ steps.plan.outputs.plan_digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: torchtitan-npu/vllm-ascend
+          ref: main
+          persist-credentials: false
+      - name: Create trusted A5 smoke plan
+        id: plan
+        env:
+          CI_TEST_CASES: ${{ inputs.test_cases }}
+        run: python3 .github/scripts/lite_actions/prepare_request.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lite-ci-request-${{ github.run_attempt }}
+          path: .ci-request/ci-request.json
+          if-no-files-found: error
+          retention-days: 1
+
+  smoke:
+    needs: prepare
+    runs-on: ubuntu-latest
+    name: ${{ matrix.test_id }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: torchtitan-npu/vllm-ascend
+          ref: main
+          persist-credentials: false
+      - name: Wait for Yellow A5 worker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+          CI_RESULT_AUTHOR: ${{ vars.LITE_CI_RESULT_ACTOR || 'depeng1994' }}
+          CI_PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}
+          CI_CASE: ${{ toJSON(matrix) }}
+          CI_WORKFLOW: lite_actions_dispatcher_smoke.yml
+        run: python3 .github/scripts/lite_actions/wait_result.py
+
+  result:
+    if: always()
+    needs: [prepare, smoke]
+    runs-on: ubuntu-latest
+    name: Lite-Actions-Smoke
+    steps:
+      - env:
+          PREPARE: ${{ needs.prepare.result }}
+          SMOKE: ${{ needs.smoke.result }}
+        run: test "$PREPARE" = success && test "$SMOKE" = success
