@@ -14,7 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-REPO = "torchtitan-npu/vllm-ascend"
+REPO = "cann-framework/vllm-ascend"
 STATUS = {"PASS", "FAIL", "INFRA_ERROR", "RESOURCE_TIMEOUT", "TIMED_OUT", "CANCELLED", "NOT_RUN"}
 
 

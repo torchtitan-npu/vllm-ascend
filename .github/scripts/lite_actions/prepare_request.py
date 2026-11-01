@@ -7,7 +7,7 @@ import os
 import re
 from pathlib import Path
 
-REPO = "torchtitan-npu/vllm-ascend"
+REPO = "cann-framework/vllm-ascend"
 WORKFLOW = "lite_actions_dispatcher_smoke.yml"
 CASES = {"dispatch_smoke_a5_8p": (1, 8, 120), "dispatch_smoke_a5_32p": (4, 8, 240)}
 DEFAULTS = dict(worker="yellow", target_pool="a5_shared_yellow", docker="vllm-kimi-wangjinyin")
