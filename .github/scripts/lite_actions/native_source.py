@@ -10,6 +10,8 @@ import re
 import time
 import urllib.request
 
+from blue_catalog import BLUE_SMOKE_SUITE
+
 REPO = "cann-framework/vllm-ascend"
 REPO_ID = 1438625957
 FORK = "depeng1994/vllm-ascend"
@@ -34,9 +36,7 @@ def api(path):
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with urllib.request.build_opener(NoRedirect()).open(
-        request, timeout=25
-    ) as response:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=25) as response:
         data = response.read(2 * 1024**2 + 1)
     if len(data) > 2 * 1024**2:
         raise ValueError("source authority response exceeds budget")
@@ -62,12 +62,7 @@ def current_pr(number, get=api):
         raise ValueError("unauthorized Blue PR source")
     head = pr["head"].get("sha")
     base = get("/branches/main").get("commit", {}).get("sha")
-    if (
-        not isinstance(head, str)
-        or not SHA.fullmatch(head)
-        or not isinstance(base, str)
-        or not SHA.fullmatch(base)
-    ):
+    if not isinstance(head, str) or not SHA.fullmatch(head) or not isinstance(base, str) or not SHA.fullmatch(base):
         raise ValueError("invalid Head/Base SHA")
     return pr, head, base
 
@@ -78,9 +73,7 @@ def assert_current(source, get=api):
         if (head, base) != (source["head_sha"], source["base_sha"]):
             raise ValueError("STALE: PR Head/Base advanced; rerun from the current PR")
         labels = {x["name"] for x in pr.get("labels", [])}
-        tests = ["vllm_worker_os_blue", "dispatch_smoke_a3_8p"]
-        if "lite-a3-16p" in labels:
-            tests.append("dispatch_smoke_a3_16p")
+        tests = list(BLUE_SMOKE_SUITE)
         if "lite-a3-blue" not in labels or tests != source["test_ids"]:
             raise ValueError("STALE: Blue selection or authorization changed")
 
@@ -113,9 +106,7 @@ def build_source(plan, event, get=api):
         if not isinstance(merge, str) or not SHA.fullmatch(merge):
             raise ValueError("MERGE_NOT_READY")
         commit = get("/git/commits/" + merge)
-        if commit.get("sha") != merge or [
-            p.get("sha") for p in commit.get("parents", [])
-        ] != [base, head]:
+        if commit.get("sha") != merge or [p.get("sha") for p in commit.get("parents", [])] != [base, head]:
             raise ValueError("STALE_MERGE_PARENTS")
         source.update(
             mode="merge_result",
@@ -141,27 +132,18 @@ def build_source(plan, event, get=api):
         raise ValueError("invalid tested tree")
     if any(c["kind"] != "worker_probe" for c in plan["cases"]):
         content = get("/contents/" + PAYLOAD + "?ref=" + source["source_sha"])
-        if (
-            content.get("type") != "file"
-            or content.get("path") != PAYLOAD
-            or content.get("size", 0) > 65536
-        ):
+        if content.get("type") != "file" or content.get("path") != PAYLOAD or content.get("size", 0) > 65536:
             raise ValueError("missing/oversized source payload interface")
         tree = ast.parse(base64.b64decode(content["content"], validate=False))
         version = any(
             isinstance(n, ast.Assign)
-            and any(
-                isinstance(t, ast.Name) and t.id == "PAYLOAD_API_VERSION"
-                for t in n.targets
-            )
+            and any(isinstance(t, ast.Name) and t.id == "PAYLOAD_API_VERSION" for t in n.targets)
             and isinstance(n.value, ast.Constant)
             and type(n.value.value) is int
             and n.value.value == 1
             for n in tree.body
         )
-        function = any(
-            isinstance(n, ast.FunctionDef) and n.name == "all_reduce" for n in tree.body
-        )
+        function = any(isinstance(n, ast.FunctionDef) and n.name == "all_reduce" for n in tree.body)
         if not version or not function:
             raise ValueError("source payload API 1/all_reduce interface missing")
     assert_current(source, get)
@@ -173,10 +155,7 @@ def prepare_source(plan, event):
         try:
             return build_source(plan, event)
         except ValueError as exc:
-            if (
-                str(exc) not in {"MERGE_NOT_READY", "STALE_MERGE_PARENTS"}
-                or attempt == 4
-            ):
+            if str(exc) not in {"MERGE_NOT_READY", "STALE_MERGE_PARENTS"} or attempt == 4:
                 raise
             time.sleep(2)
     raise ValueError("merge source unavailable")
