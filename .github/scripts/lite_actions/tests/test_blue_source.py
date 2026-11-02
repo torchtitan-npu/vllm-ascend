@@ -20,9 +20,7 @@ import wait_result  # noqa: E402 - isolated script-directory import for controll
 
 class BlueSourceTests(unittest.TestCase):
     def setUp(self):
-        self.env = patch.dict(
-            os.environ, GITHUB_WORKFLOW_SHA="c" * 40, GITHUB_RUN_ID="123"
-        )
+        self.env = patch.dict(os.environ, GITHUB_WORKFLOW_SHA="c" * 40, GITHUB_RUN_ID="123")
         self.env.start()
         self.addCleanup(self.env.stop)
         self.base = "b" * 40
@@ -45,11 +43,11 @@ class BlueSourceTests(unittest.TestCase):
             ),
         )
         self.parents = [{"sha": self.base}, {"sha": "a" * 40}]
-        self.payload = b"PAYLOAD_API_VERSION = 1\ndef all_reduce(tensor):\n    raise RuntimeError('not executed in Prepare')\n"
-        self.event = {"pull_request": self.pr}
-        self.plan = prepare_request.create_plan(
-            "pull_request_target", self.event, "", 123, 1
+        self.payload = (
+            b"PAYLOAD_API_VERSION = 1\ndef all_reduce(tensor):\n    raise RuntimeError('not executed in Prepare')\n"
         )
+        self.event = {"pull_request": self.pr}
+        self.plan = prepare_request.create_plan("pull_request_target", self.event, "", 123, 1)
 
     def get(self, path):
         if path == "/pulls/7":
@@ -77,24 +75,40 @@ class BlueSourceTests(unittest.TestCase):
     def test_blue_plan_keeps_schema3_and_fixed_resources(self):
         self.assertEqual(self.plan["schema"], 3)
         self.assertEqual(self.plan["sha"], "a" * 40)
-        self.assertEqual(
-            self.plan["cases"][0]["resources"], dict(nodes=0, devices_per_node=0)
-        )
+        self.assertEqual(self.plan["cases"][0]["resources"], dict(nodes=0, devices_per_node=0))
         self.assertIsNone(self.plan["cases"][0]["docker"])
         self.assertEqual(self.plan["cases"][1]["docker"], "vllm_hccl_smoke")
-        self.assertEqual(
-            self.plan["cases"][1]["resources"], dict(nodes=1, devices_per_node=8)
-        )
+        self.assertEqual(self.plan["cases"][1]["resources"], dict(nodes=1, devices_per_node=8))
 
-    def test_explicit_blue16_label_adds_required_case(self):
+    def test_legacy_blue16_label_is_redundant_and_does_not_duplicate_case(self):
         self.pr["labels"].append({"name": "lite-a3-16p"})
-        plan = prepare_request.create_plan(
-            "pull_request_target", self.event, "", 123, 1
-        )
+        plan = prepare_request.create_plan("pull_request_target", self.event, "", 123, 1)
+        self.assertEqual(plan, self.plan)
         self.assertEqual(plan["cases"][-1]["test_id"], "dispatch_smoke_a3_16p")
+        self.assertEqual(plan["cases"][-1]["resources"], dict(nodes=2, devices_per_node=8))
+
+    def test_default_blue_requires_all_three_cases_without_16p_label(self):
         self.assertEqual(
-            plan["cases"][-1]["resources"], dict(nodes=2, devices_per_node=8)
+            [x["test_id"] for x in self.plan["cases"]],
+            ["vllm_worker_os_blue", "dispatch_smoke_a3_8p", "dispatch_smoke_a3_16p"],
         )
+        self.assertEqual(self.plan["cases"][2]["resources"], {"nodes": 2, "devices_per_node": 8})
+        self.assertEqual(self.plan["cases"][2]["docker"], "vllm_hccl_smoke")
+        self.assertEqual(self.plan["cases"][2]["worker"], "blue")
+
+    def test_previous_os_8p_only_result_is_stale_under_full_suite(self):
+        source = self.build()
+        source["test_ids"] = source["test_ids"][:2]
+        with self.assertRaisesRegex(ValueError, "selection"):
+            native_source.assert_current(source, self.get)
+
+    def test_manual_three_case_selection_remains_available(self):
+        ids = ["vllm_worker_os_blue", "dispatch_smoke_a3_8p", "dispatch_smoke_a3_16p"]
+        with patch.dict(os.environ, GITHUB_REF="refs/heads/main", GITHUB_SHA="c" * 40):
+            plan = prepare_request.create_plan(
+                "workflow_dispatch", {}, json.dumps([{"test_id": x} for x in ids]), 123, 1
+            )
+        self.assertEqual([x["test_id"] for x in plan["cases"]], ids)
 
     def test_real_source_identity_is_merge_not_head(self):
         source = self.build()
@@ -137,7 +151,7 @@ class BlueSourceTests(unittest.TestCase):
 
     def test_spec_upgrade_and_label_removal_invalidate_old_green(self):
         source = self.build()
-        for labels in ([], [{"name": "lite-a3-blue"}, {"name": "lite-a3-16p"}]):
+        for labels in ([], [{"name": "lite-a3-16p"}]):
             self.pr["labels"] = labels
             with self.assertRaisesRegex(ValueError, "selection"):
                 native_source.assert_current(source, self.get)
@@ -148,9 +162,7 @@ class BlueSourceTests(unittest.TestCase):
             self.build()
 
     def test_manual_blue_and_a5_cannot_mix(self):
-        selections = json.dumps(
-            [{"test_id": "dispatch_smoke_a3_8p"}, {"test_id": "dispatch_smoke_a5_8p"}]
-        )
+        selections = json.dumps([{"test_id": "dispatch_smoke_a3_8p"}, {"test_id": "dispatch_smoke_a5_8p"}])
         with patch.dict(os.environ, GITHUB_REF="refs/heads/main", GITHUB_SHA="c" * 40):
             with self.assertRaisesRegex(ValueError, "cannot share"):
                 prepare_request.create_plan("workflow_dispatch", {}, selections, 123, 1)
@@ -189,10 +201,7 @@ class BlueSourceTests(unittest.TestCase):
                 [
                     dict(
                         user={"login": "depeng1994"},
-                        body="Lite-CI-V3 123:1:"
-                        + case["case_id"]
-                        + "\n"
-                        + json.dumps(value),
+                        body="Lite-CI-V3 123:1:" + case["case_id"] + "\n" + json.dumps(value),
                     )
                 ],
                 run_id=123,
@@ -248,6 +257,12 @@ class BlueSourceTests(unittest.TestCase):
         result = native_reconcile.reconcile(get, send)
         self.assertTrue(calls[0][0].startswith("/statuses/"))
         self.assertEqual(calls[0][1]["state"], "pending")
+        self.assertEqual(
+            calls[0][1]["description"],
+            native_result.description(
+                self.base, ["vllm_worker_os_blue", "dispatch_smoke_a3_8p", "dispatch_smoke_a3_16p"]
+            ),
+        )
         self.assertTrue(calls[1][0].endswith("/dispatches"))
         self.assertEqual(calls[1][1]["inputs"]["expected_base_sha"], "c" * 40)
         self.assertEqual(result[0]["run_id"], 789)
@@ -256,9 +271,7 @@ class BlueSourceTests(unittest.TestCase):
 
     def test_workflow_pins_all_control_checkouts_and_uploads_request_last(self):
         root = SCRIPTS.parents[2]
-        workflow = (
-            root / ".github/workflows/lite_actions_dispatcher_smoke.yml"
-        ).read_text()
+        workflow = (root / ".github/workflows/lite_actions_dispatcher_smoke.yml").read_text()
         self.assertEqual(workflow.count("ref: ${{ github.workflow_sha }}"), 3)
         self.assertLess(
             workflow.index("name: lite-ci-source-"),

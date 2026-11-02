@@ -7,21 +7,13 @@ import os
 import re
 from pathlib import Path
 
+from blue_catalog import BLUE_CASES, BLUE_DEFAULTS, BLUE_SMOKE_SUITE
+
 REPO = "cann-framework/vllm-ascend"
 WORKFLOW = "lite_actions_dispatcher_smoke.yml"
 A5_CASES = {"dispatch_smoke_a5_8p": (1, 8, 120), "dispatch_smoke_a5_32p": (4, 8, 240)}
-BLUE_CASES = {
-    "vllm_worker_os_blue": (0, 0, 90),
-    "dispatch_smoke_a3_8p": (1, 8, 180),
-    "dispatch_smoke_a3_16p": (2, 8, 240),
-}
 CASES = {**A5_CASES, **BLUE_CASES}
-BLUE_DEFAULTS = dict(
-    worker="blue", target_pool="a3_shared_blue", docker="vllm_hccl_smoke"
-)
-DEFAULTS = dict(
-    worker="yellow", target_pool="a5_shared_yellow", docker="vllm-kimi-wangjinyin"
-)
+DEFAULTS = dict(worker="yellow", target_pool="a5_shared_yellow", docker="vllm-kimi-wangjinyin")
 
 
 def selectors(event, payload, value):
@@ -31,11 +23,7 @@ def selectors(event, payload, value):
         target = base["ref"]
         if (
             base["repo"]["full_name"] != REPO
-            or not (
-                target == "main"
-                or target.startswith("releases/")
-                or target.endswith("-dev")
-            )
+            or not (target == "main" or target.startswith("releases/") or target.endswith("-dev"))
             or head["repo"]["full_name"] != "depeng1994/vllm-ascend"
             or pr["user"]["login"] != "depeng1994"
             or pr.get("draft")
@@ -48,9 +36,7 @@ def selectors(event, payload, value):
         if "lite-a3-blue" in labels:
             if target != "main":
                 raise ValueError("Blue merge tests only target main")
-            ids = ["vllm_worker_os_blue", "dispatch_smoke_a3_8p"]
-            if "lite-a3-16p" in labels:
-                ids.append("dispatch_smoke_a3_16p")
+            ids = list(BLUE_SMOKE_SUITE)
         elif "lite-a5-32p" in labels:
             ids.append("dispatch_smoke_a5_32p")
     elif event == "workflow_dispatch":
@@ -110,9 +96,7 @@ def create_plan(event, payload, value, run_id, attempt):
         "cases": items,
     }
     plan["plan_digest"] = hashlib.sha256(
-        json.dumps(
-            plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        ).encode()
+        json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     ).hexdigest()
     return plan
 
@@ -124,9 +108,7 @@ def main():
     effective_event = os.environ["GITHUB_EVENT_NAME"]
     source_pr = os.environ.get("CI_SOURCE_PR", "")
     if source_pr:
-        if effective_event != "workflow_dispatch" or not re.fullmatch(
-            r"[1-9][0-9]{0,8}", source_pr
-        ):
+        if effective_event != "workflow_dispatch" or not re.fullmatch(r"[1-9][0-9]{0,8}", source_pr):
             raise ValueError("invalid native PR recheck")
         from native_source import current_pr
 
@@ -154,19 +136,11 @@ def main():
         from native_source import prepare_source
 
         source = prepare_source(plan, payload)
-        out.joinpath("source.json").write_text(
-            json.dumps(source, sort_keys=True) + "\n"
-        )
-    (out / "ci-request.json").write_text(
-        json.dumps(plan, separators=(",", ":"), ensure_ascii=False) + "\n"
-    )
+        out.joinpath("source.json").write_text(json.dumps(source, sort_keys=True) + "\n")
+    (out / "ci-request.json").write_text(json.dumps(plan, separators=(",", ":"), ensure_ascii=False) + "\n")
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write("native_source=" + str(native).lower() + "\n")
-        output.write(
-            "matrix="
-            + json.dumps({"include": plan["cases"]}, separators=(",", ":"))
-            + "\n"
-        )
+        output.write("matrix=" + json.dumps({"include": plan["cases"]}, separators=(",", ":")) + "\n")
         output.write("sha=" + plan["sha"] + "\n")
         output.write("plan_digest=" + plan["plan_digest"] + "\n")
 

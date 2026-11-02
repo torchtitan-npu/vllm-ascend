@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       test_cases:
-        description: 'JSON fixed test_id selectors; empty preserves A5 8P; Blue requires explicit selectors'
+        description: 'JSON test_id selectors; Blue suite: vllm_worker_os_blue, dispatch_smoke_a3_8p, dispatch_smoke_a3_16p; empty preserves A5 8P'
         required: false
         type: string
       source_pr:

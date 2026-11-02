@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 
+from blue_catalog import BLUE_SMOKE_SUITE
 from native_result import CONTEXT, description, post
 from native_source import REPO, api, current_pr
 
@@ -29,8 +30,7 @@ def reconcile(get=api, send=post):
             item.get("draft")
             or "lite-a3-blue" not in labels
             or item.get("user", {}).get("login") != "depeng1994"
-            or item.get("head", {}).get("repo", {}).get("full_name")
-            != "depeng1994/vllm-ascend"
+            or item.get("head", {}).get("repo", {}).get("full_name") != "depeng1994/vllm-ascend"
         ):
             continue
         number = item["number"]
@@ -38,21 +38,15 @@ def reconcile(get=api, send=post):
         labels = {x["name"] for x in pr.get("labels", [])}
         if "lite-a3-blue" not in labels:
             continue
-        tests = ["vllm_worker_os_blue", "dispatch_smoke_a3_8p"]
-        if "lite-a3-16p" in labels:
-            tests.append("dispatch_smoke_a3_16p")
+        tests = list(BLUE_SMOKE_SUITE)
         desc = description(base, tests)
         statuses = get("/commits/" + head + "/status?per_page=100").get("statuses", [])
         prior = next((x for x in statuses if x.get("context") == CONTEXT), None)
         if prior and prior.get("description") == desc:
-            results.append(
-                {"pr": number, "state": "EXISTING_VERSION_OR_DISPATCH_UNKNOWN"}
-            )
+            results.append({"pr": number, "state": "EXISTING_VERSION_OR_DISPATCH_UNKNOWN"})
             continue
         nonce = hashlib.sha256(
-            json.dumps(
-                [number, head, base, control, tests], separators=(",", ":")
-            ).encode()
+            json.dumps([number, head, base, control, tests], separators=(",", ":")).encode()
         ).hexdigest()[:32]
         # Invalidate old green before creating the new version's execution.
         send(
@@ -82,9 +76,7 @@ def reconcile(get=api, send=post):
                 "pr": number,
                 "state": "DISPATCHED",
                 "nonce": nonce,
-                "run_id": response.get("workflow_run_id")
-                if isinstance(response, dict)
-                else None,
+                "run_id": response.get("workflow_run_id") if isinstance(response, dict) else None,
             }
         )
     return results
