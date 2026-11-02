@@ -7,10 +7,21 @@ import os
 import re
 from pathlib import Path
 
-REPO = "torchtitan-npu/vllm-ascend"
+REPO = "cann-framework/vllm-ascend"
 WORKFLOW = "lite_actions_dispatcher_smoke.yml"
-CASES = {"dispatch_smoke_a5_8p": (1, 8, 120), "dispatch_smoke_a5_32p": (4, 8, 240)}
-DEFAULTS = dict(worker="yellow", target_pool="a5_shared_yellow", docker="vllm-kimi-wangjinyin")
+A5_CASES = {"dispatch_smoke_a5_8p": (1, 8, 120), "dispatch_smoke_a5_32p": (4, 8, 240)}
+BLUE_CASES = {
+    "vllm_worker_os_blue": (0, 0, 90),
+    "dispatch_smoke_a3_8p": (1, 8, 180),
+    "dispatch_smoke_a3_16p": (2, 8, 240),
+}
+CASES = {**A5_CASES, **BLUE_CASES}
+BLUE_DEFAULTS = dict(
+    worker="blue", target_pool="a3_shared_blue", docker="vllm_hccl_smoke"
+)
+DEFAULTS = dict(
+    worker="yellow", target_pool="a5_shared_yellow", docker="vllm-kimi-wangjinyin"
+)
 
 
 def selectors(event, payload, value):
@@ -20,7 +31,11 @@ def selectors(event, payload, value):
         target = base["ref"]
         if (
             base["repo"]["full_name"] != REPO
-            or not (target == "main" or target.startswith("releases/") or target.endswith("-dev"))
+            or not (
+                target == "main"
+                or target.startswith("releases/")
+                or target.endswith("-dev")
+            )
             or head["repo"]["full_name"] != "depeng1994/vllm-ascend"
             or pr["user"]["login"] != "depeng1994"
             or pr.get("draft")
@@ -29,7 +44,14 @@ def selectors(event, payload, value):
             raise ValueError("PR is not on the trusted admission allowlist")
         sha = head["sha"]
         ids = ["dispatch_smoke_a5_8p"]
-        if any(x["name"] == "lite-a5-32p" for x in pr.get("labels", [])):
+        labels = {x["name"] for x in pr.get("labels", [])}
+        if "lite-a3-blue" in labels:
+            if target != "main":
+                raise ValueError("Blue merge tests only target main")
+            ids = ["vllm_worker_os_blue", "dispatch_smoke_a3_8p"]
+            if "lite-a3-16p" in labels:
+                ids.append("dispatch_smoke_a3_16p")
+        elif "lite-a5-32p" in labels:
             ids.append("dispatch_smoke_a5_32p")
     elif event == "workflow_dispatch":
         if os.environ.get("GITHUB_REF") != "refs/heads/main":
@@ -39,7 +61,7 @@ def selectors(event, payload, value):
             ids = ["dispatch_smoke_a5_8p"]
         else:
             values = json.loads(value)
-            if not isinstance(values, list) or not 1 <= len(values) <= 2:
+            if not isinstance(values, list) or not 1 <= len(values) <= 3:
                 raise ValueError("invalid smoke test selection")
             if any(not isinstance(x, dict) or set(x) != {"test_id"} for x in values):
                 raise ValueError("only fixed test_id selectors supported")
@@ -50,11 +72,14 @@ def selectors(event, payload, value):
         raise ValueError("invalid source SHA")
     if not ids or len(ids) != len(set(ids)) or any(x not in CASES for x in ids):
         raise ValueError("unknown/duplicate smoke case")
+    if any(x in BLUE_CASES for x in ids) and any(x in A5_CASES for x in ids):
+        raise ValueError("Blue and Yellow cases cannot share a native source plan")
     return sha, ids
 
 
 def create_plan(event, payload, value, run_id, attempt):
     sha, ids = selectors(event, payload, value)
+    defaults = BLUE_DEFAULTS if ids[0] in BLUE_CASES else DEFAULTS
     items = []
     for i, test_id in enumerate(ids):
         nodes, ngpu, timeout = CASES[test_id]
@@ -63,12 +88,14 @@ def create_plan(event, payload, value, run_id, attempt):
                 "case_id": f"case_{i:03d}_{test_id}",
                 "order": i,
                 "test_id": test_id,
-                "label": f"A5 HCCL distributed smoke {nodes * ngpu}P",
-                "kind": "npu_smoke",
-                "worker": "yellow",
-                "target_pool": "a5_shared_yellow",
+                "label": "vLLM Blue worker OS probe"
+                if nodes == 0
+                else f"{'A3' if test_id in BLUE_CASES else 'A5'} HCCL distributed smoke {nodes * ngpu}P",
+                "kind": "worker_probe" if nodes == 0 else "npu_smoke",
+                "worker": defaults["worker"],
+                "target_pool": defaults["target_pool"] if nodes else None,
                 "resources": {"nodes": nodes, "devices_per_node": ngpu},
-                "docker": DEFAULTS["docker"],
+                "docker": defaults["docker"] if nodes else None,
                 "execution_timeout_seconds": timeout,
             }
         )
@@ -79,11 +106,13 @@ def create_plan(event, payload, value, run_id, attempt):
         "run_id": run_id,
         "attempt": attempt,
         "sha": sha,
-        "defaults": DEFAULTS,
+        "defaults": defaults,
         "cases": items,
     }
     plan["plan_digest"] = hashlib.sha256(
-        json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        json.dumps(
+            plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
     ).hexdigest()
     return plan
 
@@ -92,8 +121,27 @@ def main():
     if os.environ["GITHUB_REPOSITORY"] != REPO:
         raise ValueError("untrusted repository")
     payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    effective_event = os.environ["GITHUB_EVENT_NAME"]
+    source_pr = os.environ.get("CI_SOURCE_PR", "")
+    if source_pr:
+        if effective_event != "workflow_dispatch" or not re.fullmatch(
+            r"[1-9][0-9]{0,8}", source_pr
+        ):
+            raise ValueError("invalid native PR recheck")
+        from native_source import current_pr
+
+        pr, head, base = current_pr(int(source_pr))
+        if (head, base) != (
+            os.environ.get("CI_EXPECTED_HEAD"),
+            os.environ.get("CI_EXPECTED_BASE"),
+        ):
+            raise ValueError("STALE_RECHECK_INTENT")
+        if not any(x["name"] == "lite-a3-blue" for x in pr.get("labels", [])):
+            raise ValueError("Blue recheck requires opt-in label")
+        payload = {"pull_request": pr}
+        effective_event = "pull_request_target"
     plan = create_plan(
-        os.environ["GITHUB_EVENT_NAME"],
+        effective_event,
         payload,
         os.environ.get("CI_TEST_CASES", ""),
         int(os.environ["GITHUB_RUN_ID"]),
@@ -101,9 +149,24 @@ def main():
     )
     out = Path(".ci-request")
     out.mkdir(exist_ok=True)
-    (out / "ci-request.json").write_text(json.dumps(plan, separators=(",", ":"), ensure_ascii=False) + "\n")
+    native = plan["cases"][0]["test_id"] in BLUE_CASES
+    if native:
+        from native_source import prepare_source
+
+        source = prepare_source(plan, payload)
+        out.joinpath("source.json").write_text(
+            json.dumps(source, sort_keys=True) + "\n"
+        )
+    (out / "ci-request.json").write_text(
+        json.dumps(plan, separators=(",", ":"), ensure_ascii=False) + "\n"
+    )
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-        output.write("matrix=" + json.dumps({"include": plan["cases"]}, separators=(",", ":")) + "\n")
+        output.write("native_source=" + str(native).lower() + "\n")
+        output.write(
+            "matrix="
+            + json.dumps({"include": plan["cases"]}, separators=(",", ":"))
+            + "\n"
+        )
         output.write("sha=" + plan["sha"] + "\n")
         output.write("plan_digest=" + plan["plan_digest"] + "\n")
 

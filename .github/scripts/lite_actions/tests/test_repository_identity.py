@@ -1,0 +1,225 @@
+"""CPU-only regression for the GitHub controller's repository rename.
+
+Run with python3 -m unittest discover -s .github/scripts/lite_actions/tests -v.
+No GitHub requests, worker deployment, or accelerator processes are started.
+"""
+
+import copy
+import importlib.util
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[4]
+REPO = "cann-framework/vllm-ascend"
+OLD_REPO = "torchtitan-npu/vllm-ascend"
+SHA = "b" * 40
+
+
+def load_control(name):
+    path = ROOT / ".github/scripts/lite_actions" / (name + ".py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+prepare = load_control("prepare_request")
+waiter = load_control("wait_result")
+
+
+class RepositoryIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.payload = {
+            "pull_request": {
+                "base": {"ref": "main", "repo": {"full_name": REPO}},
+                "head": {"sha": SHA, "repo": {"full_name": "depeng1994/vllm-ascend"}},
+                "user": {"login": "depeng1994"},
+                "state": "open",
+                "draft": False,
+                "labels": [],
+            }
+        }
+        self.item = {
+            "case_id": "case_000_dispatch_smoke_a5_8p",
+            "test_id": "dispatch_smoke_a5_8p",
+            "worker": "yellow",
+            "target_pool": "a5_shared_yellow",
+            "docker": "vllm-kimi-wangjinyin",
+            "resources": {"nodes": 1, "devices_per_node": 8},
+        }
+        self.result = {
+            **self.item,
+            "schema": 3,
+            "repo": REPO,
+            "workflow": prepare.WORKFLOW,
+            "run_id": 100,
+            "attempt": 2,
+            "sha": SHA,
+            "plan_digest": "d" * 64,
+            "status": "PASS",
+            "exit_code": 0,
+            "cleanup_verified": True,
+            "last_20_lines": [],
+        }
+
+    def find(self, result, author="depeng1994"):
+        comment = {
+            "user": {"login": author},
+            "body": "Lite-CI-V3 100:2:"
+            + self.item["case_id"]
+            + "\n"
+            + json.dumps(result),
+        }
+        return waiter.find_result(
+            [comment],
+            run_id=100,
+            attempt=2,
+            sha=SHA,
+            digest="d" * 64,
+            item=self.item,
+            workflow=prepare.WORKFLOW,
+            author="depeng1994",
+        )
+
+    def test_producer_and_waiter_use_canonical_repository(self):
+        self.assertEqual(prepare.REPO, REPO)
+        self.assertEqual(waiter.REPO, REPO)
+
+    def test_workflow_checks_out_canonical_control_not_personal_fork(self):
+        workflow = (
+            ROOT / ".github/workflows/lite_actions_dispatcher_smoke.yml"
+        ).read_text()
+        self.assertNotIn(OLD_REPO, workflow)
+        self.assertEqual(workflow.count("repository: " + REPO + "\n"), 3)
+        self.assertNotIn("repository: depeng1994/vllm-ascend", workflow)
+
+    def test_canonical_personal_fork_pr_keeps_a5_contract(self):
+        plan = prepare.create_plan("pull_request_target", self.payload, "", 100, 2)
+        self.assertEqual((plan["schema"], plan["repo"], plan["sha"]), (3, REPO, SHA))
+        self.assertEqual(len(plan["cases"]), 1)
+        for key, value in self.item.items():
+            self.assertEqual(plan["cases"][0][key], value)
+
+    def test_obsolete_target_repository_is_rejected_without_alias(self):
+        self.payload["pull_request"]["base"]["repo"]["full_name"] = OLD_REPO
+        with self.assertRaisesRegex(ValueError, "allowlist"):
+            prepare.create_plan("pull_request_target", self.payload, "", 100, 2)
+
+    def test_other_source_fork_is_rejected(self):
+        self.payload["pull_request"]["head"]["repo"]["full_name"] = "other/vllm-ascend"
+        with self.assertRaisesRegex(ValueError, "allowlist"):
+            prepare.create_plan("pull_request_target", self.payload, "", 100, 2)
+
+    def test_other_actor_is_rejected(self):
+        self.payload["pull_request"]["user"]["login"] = "other"
+        with self.assertRaisesRegex(ValueError, "allowlist"):
+            prepare.create_plan("pull_request_target", self.payload, "", 100, 2)
+
+    def test_manual_8p_and_32p_topologies_are_preserved(self):
+        selections = json.dumps([{"test_id": key} for key in prepare.A5_CASES])
+        with patch.dict(
+            os.environ, {"GITHUB_REF": "refs/heads/main", "GITHUB_SHA": SHA}, clear=True
+        ):
+            plan = prepare.create_plan("workflow_dispatch", {}, selections, 100, 2)
+        self.assertEqual(plan["repo"], REPO)
+        self.assertEqual([case["resources"]["nodes"] for case in plan["cases"]], [1, 4])
+        self.assertTrue(all(case["worker"] == "yellow" for case in plan["cases"]))
+        self.assertTrue(
+            all(case["docker"] == "vllm-kimi-wangjinyin" for case in plan["cases"])
+        )
+
+    def test_manual_non_default_ref_is_rejected(self):
+        with patch.dict(
+            os.environ,
+            {"GITHUB_REF": "refs/heads/untrusted", "GITHUB_SHA": SHA},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "only supported from main"):
+                prepare.create_plan("workflow_dispatch", {}, "", 100, 2)
+
+    def test_duplicate_selector_is_rejected(self):
+        selection = json.dumps([{"test_id": "dispatch_smoke_a5_8p"}] * 2)
+        with patch.dict(
+            os.environ, {"GITHUB_REF": "refs/heads/main", "GITHUB_SHA": SHA}, clear=True
+        ):
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                prepare.create_plan("workflow_dispatch", {}, selection, 100, 2)
+
+    def test_prepare_entrypoint_accepts_current_github_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event = root / "event.json"
+            event.write_text("{}")
+            env = {
+                "GITHUB_REPOSITORY": REPO,
+                "GITHUB_EVENT_PATH": str(event),
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_REF": "refs/heads/main",
+                "GITHUB_SHA": SHA,
+                "GITHUB_RUN_ID": "100",
+                "GITHUB_RUN_ATTEMPT": "2",
+                "GITHUB_OUTPUT": str(root / "outputs.txt"),
+            }
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                with patch.dict(os.environ, env, clear=True):
+                    prepare.main()
+                plan = json.loads((root / ".ci-request/ci-request.json").read_text())
+                self.assertEqual(plan["repo"], REPO)
+                self.assertIn("plan_digest=", (root / "outputs.txt").read_text())
+            finally:
+                os.chdir(previous)
+
+    def test_control_entrypoints_reject_other_repositories_before_io(self):
+        for module in (prepare, waiter):
+            for repository in (OLD_REPO, "depeng1994/vllm-ascend", "other/repo"):
+                with self.subTest(module=module.__name__, repository=repository):
+                    with patch.dict(
+                        os.environ, {"GITHUB_REPOSITORY": repository}, clear=True
+                    ):
+                        with self.assertRaisesRegex(ValueError, "untrusted repository"):
+                            module.main()
+
+    def test_waiter_accepts_matching_canonical_result(self):
+        self.assertEqual(self.find(self.result), self.result)
+
+    def test_waiter_rejects_old_repository_result_without_rewriting_history(self):
+        self.assertIsNone(self.find({**self.result, "repo": OLD_REPO}))
+
+    def test_waiter_rejects_other_attempt_sha_and_plan(self):
+        for key, value in (
+            ("attempt", 1),
+            ("sha", "a" * 40),
+            ("plan_digest", "e" * 64),
+            ("run_id", 101),
+        ):
+            with self.subTest(key=key):
+                self.assertIsNone(self.find({**self.result, key: value}))
+
+    def test_waiter_pass_requires_successful_cleanup(self):
+        for patch_value in (
+            {"cleanup_verified": False},
+            {"exit_code": 1},
+            {"exit_code": False},
+        ):
+            with self.subTest(patch_value=patch_value):
+                self.assertIsNone(self.find({**self.result, **patch_value}))
+
+    def test_waiter_rejects_other_worker_container_and_author(self):
+        for patch_value in (
+            {"worker": "blue"},
+            {"docker": "vllm_hccl_smoke"},
+            {"repo": "other/repo"},
+        ):
+            with self.subTest(patch_value=patch_value):
+                self.assertIsNone(self.find({**self.result, **patch_value}))
+        self.assertIsNone(self.find(copy.deepcopy(self.result), author="other"))
+
+
+if __name__ == "__main__":
+    unittest.main()
