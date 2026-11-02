@@ -1,13 +1,12 @@
-"""Tested source payload for the Lite Actions Blue A3 HCCL smoke.
+"""Intentional negative payload for a non-mergeable Blue acceptance PR.
 
-The immutable Worker runner owns topology, timeout, expected sums and evidence.
-This function is loaded only inside the leased NPU container, never in Prepare.
+The trusted controller must prepare this PR's merge source successfully, then
+report an actual NPU execution failure and verified cleanup. Never merge this
+acceptance branch into the production controller.
 """
 
 PAYLOAD_API_VERSION = 1
 
 
 def all_reduce(tensor):
-    import torch.distributed as dist
-
-    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    raise RuntimeError("EXPECTED_BLUE_ACCEPTANCE_PAYLOAD_FAILURE_20261102")
