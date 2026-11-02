@@ -15,13 +15,36 @@ import urllib.parse
 import urllib.request
 
 REPO = "cann-framework/vllm-ascend"
-STATUS = {"PASS", "FAIL", "INFRA_ERROR", "RESOURCE_TIMEOUT", "TIMED_OUT", "CANCELLED", "NOT_RUN"}
+STATUS = {
+    "PASS",
+    "FAIL",
+    "INFRA_ERROR",
+    "RESOURCE_TIMEOUT",
+    "TIMED_OUT",
+    "CANCELLED",
+    "NOT_RUN",
+}
 
 
-def find_result(comments, *, run_id, attempt, sha, digest, item, workflow, author):
+def find_result(
+    comments,
+    *,
+    run_id,
+    attempt,
+    sha,
+    digest,
+    item,
+    workflow,
+    author,
+    native_source=None,
+):
     prefix = f"Lite-CI-V3 {run_id}:{attempt}:{item['case_id']}\n"
     for c in reversed(comments):
-        if not author or c.get("user", {}).get("login") != author or not c.get("body", "").startswith(prefix):
+        if (
+            not author
+            or c.get("user", {}).get("login") != author
+            or not c.get("body", "").startswith(prefix)
+        ):
             continue
         try:
             r = json.loads(c["body"].split("\n", 1)[1])
@@ -46,22 +69,30 @@ def find_result(comments, *, run_id, attempt, sha, digest, item, workflow, autho
         )
         if any(r.get(k) != v for k, v in expected.items()):
             continue
+        if native_source is not None and r.get("native_source") != native_source:
+            continue
         lines = r.get("last_20_lines")
         if (
             not isinstance(r.get("status"), str)
             or r.get("status") not in STATUS
             or not isinstance(lines, list)
             or len(lines) > 20
-            or any(not isinstance(s, str) or len(s) > 180 or any(ord(c) < 32 for c in s) for s in lines)
+            or any(
+                not isinstance(s, str) or len(s) > 180 or any(ord(c) < 32 for c in s)
+                for s in lines
+            )
         ):
             continue
         if r["status"] == "PASS" and (
-            type(r.get("exit_code")) is not int or r["exit_code"] != 0 or r.get("cleanup_verified") is not True
+            type(r.get("exit_code")) is not int
+            or r["exit_code"] != 0
+            or r.get("cleanup_verified") is not True
         ):
             continue
         if (
             len(c["body"].encode()) > 6100
-            or len(json.dumps({"body": c["body"]}, separators=(",", ":")).encode()) > 7000
+            or len(json.dumps({"body": c["body"]}, separators=(",", ":")).encode())
+            > 7000
         ):
             continue
         return r
@@ -70,7 +101,9 @@ def find_result(comments, *, run_id, attempt, sha, digest, item, workflow, autho
 
 def find_progress(comments, run_id, attempt, item, digest, author):
     for c in reversed(comments):
-        if c.get("user", {}).get("login") != author or not c.get("body", "").startswith("Lite-CI-PROGRESS "):
+        if c.get("user", {}).get("login") != author or not c.get("body", "").startswith(
+            "Lite-CI-PROGRESS "
+        ):
             continue
         try:
             r = json.loads(c["body"][17:])
@@ -81,7 +114,11 @@ def find_progress(comments, run_id, attempt, item, digest, author):
         if all(
             r.get(k) == v
             for k, v in dict(
-                run_id=run_id, attempt=attempt, case_id=item["case_id"], worker=item["worker"], plan_digest=digest
+                run_id=run_id,
+                attempt=attempt,
+                case_id=item["case_id"],
+                worker=item["worker"],
+                plan_digest=digest,
             ).items()
         ):
             return r.get("phase", "RECEIVED")
@@ -104,11 +141,16 @@ class RetryableAPIError(RuntimeError):
 
 
 def get(path, token):
-    headers = {"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json"}
+    headers = {
+        "Authorization": "Bearer " + token,
+        "Accept": "application/vnd.github+json",
+    }
     previous = HTTP_CACHE.get(path)
     if previous and previous[0]:
         headers["If-None-Match"] = previous[0]
-    request = urllib.request.Request(f"https://api.github.com/repos/{REPO}" + path, headers=headers)
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{REPO}" + path, headers=headers
+    )
     try:
         with urllib.request.urlopen(request, timeout=25) as response:
             data = json.load(response)
@@ -118,9 +160,15 @@ def get(path, token):
         if exc.code == 304 and previous:
             return previous[1]
         if exc.code in (429, 500, 502, 503, 504) or (
-            exc.code == 403 and (exc.headers.get("X-RateLimit-Remaining") == "0" or exc.headers.get("Retry-After"))
+            exc.code == 403
+            and (
+                exc.headers.get("X-RateLimit-Remaining") == "0"
+                or exc.headers.get("Retry-After")
+            )
         ):
-            raise RetryableAPIError(f"GitHub temporarily unavailable: HTTP {exc.code}") from exc
+            raise RetryableAPIError(
+                f"GitHub temporarily unavailable: HTTP {exc.code}"
+            ) from exc
         raise
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RetryableAPIError("GitHub temporarily unreachable") from exc
@@ -139,6 +187,19 @@ def main():
     sha = os.environ["CI_SOURCE_SHA"]
     digest = os.environ["CI_PLAN_DIGEST"]
     workflow = os.environ["CI_WORKFLOW"]
+    native_source = None
+    if os.environ.get("CI_NATIVE_SOURCE"):
+        from pathlib import Path
+
+        native_source = json.loads(Path(os.environ["CI_NATIVE_SOURCE"]).read_text())
+        if (
+            native_source.get("run_id") != run_id
+            or native_source.get("attempt") != attempt
+            or native_source.get("head_sha") != sha
+            or native_source.get("plan_digest") != digest
+            or native_source.get("control_sha") != os.environ["GITHUB_WORKFLOW_SHA"]
+        ):
+            raise ValueError("Waiter native source identity mismatch")
     start = time.monotonic()
     heartbeat = 0
     accepted = False
@@ -151,7 +212,8 @@ def main():
                 raise TimeoutError("GitHub artifact API unavailable") from None
             time.sleep(60)
     if not any(
-        a["name"] == f"lite-ci-request-{attempt}" and not a.get("expired") for a in artifacts.get("artifacts", [])
+        a["name"] == f"lite-ci-request-{attempt}" and not a.get("expired")
+        for a in artifacts.get("artifacts", [])
     ):
         raise ValueError("No plan for this attempt; re-run all jobs")
     while time.monotonic() - start < 16800:
@@ -165,7 +227,12 @@ def main():
             else:
                 raise ValueError("comment listing exceeds correlation budget")
         except RetryableAPIError:
-            print(heartbeat_line(status="WAITING_GITHUB_API", current_case=item["test_id"]), flush=True)
+            print(
+                heartbeat_line(
+                    status="WAITING_GITHUB_API", current_case=item["test_id"]
+                ),
+                flush=True,
+            )
             time.sleep(60)
             continue
         phase = find_progress(comments, run_id, attempt, item, digest, author)
@@ -179,10 +246,20 @@ def main():
             item=item,
             workflow=workflow,
             author=author,
+            native_source=native_source,
         )
         if result:
-            print(heartbeat_line(status=result["status"], current_case=item["test_id"]), flush=True)
-            print(f"CASE {item['test_id']}: {result['status']} rc={result['exit_code']}")
+            if result["status"] == "PASS" and native_source is not None:
+                from native_source import assert_current
+
+                assert_current(native_source, lambda path: get(path, token))
+            print(
+                heartbeat_line(status=result["status"], current_case=item["test_id"]),
+                flush=True,
+            )
+            print(
+                f"CASE {item['test_id']}: {result['status']} rc={result['exit_code']}"
+            )
             for line in result["last_20_lines"]:
                 print(line)
             if os.environ.get("GITHUB_STEP_SUMMARY"):
@@ -191,11 +268,27 @@ def main():
                     for k in ["worker", "target_pool", "docker", "resources"]:
                         f.write(f"- {k}: `{item[k]}`\n")
                     f.write(f"- SHA: `{sha}`\n- Status: **{result['status']}**\n")
+                    if native_source is not None:
+                        f.write(
+                            "- Test source: `"
+                            + json.dumps(native_source, sort_keys=True)
+                            + "`\n"
+                        )
+                        f.write(
+                            "- Merge guarantee: versioned_only; no atomic merge permission.\n"
+                        )
             return 0 if result["status"] == "PASS" else 1
         if not accepted and time.monotonic() - start > 300:
-            raise TimeoutError("INFRA_ERROR: assigned worker did not acknowledge within 300 seconds")
+            raise TimeoutError(
+                "INFRA_ERROR: assigned worker did not acknowledge within 300 seconds"
+            )
         if time.monotonic() >= heartbeat:
-            print(heartbeat_line(status=phase or "WAITING_WORKER", current_case=item["test_id"]), flush=True)
+            print(
+                heartbeat_line(
+                    status=phase or "WAITING_WORKER", current_case=item["test_id"]
+                ),
+                flush=True,
+            )
             heartbeat = time.monotonic() + 60
         time.sleep(60)
     raise TimeoutError("TIMED_OUT waiting for assigned worker")

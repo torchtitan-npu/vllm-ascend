@@ -69,7 +69,10 @@ class RepositoryIdentityTests(unittest.TestCase):
     def find(self, result, author="depeng1994"):
         comment = {
             "user": {"login": author},
-            "body": "Lite-CI-V3 100:2:" + self.item["case_id"] + "\n" + json.dumps(result),
+            "body": "Lite-CI-V3 100:2:"
+            + self.item["case_id"]
+            + "\n"
+            + json.dumps(result),
         }
         return waiter.find_result(
             [comment],
@@ -87,9 +90,11 @@ class RepositoryIdentityTests(unittest.TestCase):
         self.assertEqual(waiter.REPO, REPO)
 
     def test_workflow_checks_out_canonical_control_not_personal_fork(self):
-        workflow = (ROOT / ".github/workflows/lite_actions_dispatcher_smoke.yml").read_text()
+        workflow = (
+            ROOT / ".github/workflows/lite_actions_dispatcher_smoke.yml"
+        ).read_text()
         self.assertNotIn(OLD_REPO, workflow)
-        self.assertEqual(workflow.count("repository: " + REPO + "\n"), 2)
+        self.assertEqual(workflow.count("repository: " + REPO + "\n"), 3)
         self.assertNotIn("repository: depeng1994/vllm-ascend", workflow)
 
     def test_canonical_personal_fork_pr_keeps_a5_contract(self):
@@ -115,22 +120,32 @@ class RepositoryIdentityTests(unittest.TestCase):
             prepare.create_plan("pull_request_target", self.payload, "", 100, 2)
 
     def test_manual_8p_and_32p_topologies_are_preserved(self):
-        selections = json.dumps([{"test_id": key} for key in prepare.CASES])
-        with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main", "GITHUB_SHA": SHA}, clear=True):
+        selections = json.dumps([{"test_id": key} for key in prepare.A5_CASES])
+        with patch.dict(
+            os.environ, {"GITHUB_REF": "refs/heads/main", "GITHUB_SHA": SHA}, clear=True
+        ):
             plan = prepare.create_plan("workflow_dispatch", {}, selections, 100, 2)
         self.assertEqual(plan["repo"], REPO)
         self.assertEqual([case["resources"]["nodes"] for case in plan["cases"]], [1, 4])
         self.assertTrue(all(case["worker"] == "yellow" for case in plan["cases"]))
-        self.assertTrue(all(case["docker"] == "vllm-kimi-wangjinyin" for case in plan["cases"]))
+        self.assertTrue(
+            all(case["docker"] == "vllm-kimi-wangjinyin" for case in plan["cases"])
+        )
 
     def test_manual_non_default_ref_is_rejected(self):
-        with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/untrusted", "GITHUB_SHA": SHA}, clear=True):
+        with patch.dict(
+            os.environ,
+            {"GITHUB_REF": "refs/heads/untrusted", "GITHUB_SHA": SHA},
+            clear=True,
+        ):
             with self.assertRaisesRegex(ValueError, "only supported from main"):
                 prepare.create_plan("workflow_dispatch", {}, "", 100, 2)
 
     def test_duplicate_selector_is_rejected(self):
         selection = json.dumps([{"test_id": "dispatch_smoke_a5_8p"}] * 2)
-        with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/main", "GITHUB_SHA": SHA}, clear=True):
+        with patch.dict(
+            os.environ, {"GITHUB_REF": "refs/heads/main", "GITHUB_SHA": SHA}, clear=True
+        ):
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 prepare.create_plan("workflow_dispatch", {}, selection, 100, 2)
 
@@ -164,7 +179,9 @@ class RepositoryIdentityTests(unittest.TestCase):
         for module in (prepare, waiter):
             for repository in (OLD_REPO, "depeng1994/vllm-ascend", "other/repo"):
                 with self.subTest(module=module.__name__, repository=repository):
-                    with patch.dict(os.environ, {"GITHUB_REPOSITORY": repository}, clear=True):
+                    with patch.dict(
+                        os.environ, {"GITHUB_REPOSITORY": repository}, clear=True
+                    ):
                         with self.assertRaisesRegex(ValueError, "untrusted repository"):
                             module.main()
 
@@ -175,17 +192,30 @@ class RepositoryIdentityTests(unittest.TestCase):
         self.assertIsNone(self.find({**self.result, "repo": OLD_REPO}))
 
     def test_waiter_rejects_other_attempt_sha_and_plan(self):
-        for key, value in (("attempt", 1), ("sha", "a" * 40), ("plan_digest", "e" * 64), ("run_id", 101)):
+        for key, value in (
+            ("attempt", 1),
+            ("sha", "a" * 40),
+            ("plan_digest", "e" * 64),
+            ("run_id", 101),
+        ):
             with self.subTest(key=key):
                 self.assertIsNone(self.find({**self.result, key: value}))
 
     def test_waiter_pass_requires_successful_cleanup(self):
-        for patch_value in ({"cleanup_verified": False}, {"exit_code": 1}, {"exit_code": False}):
+        for patch_value in (
+            {"cleanup_verified": False},
+            {"exit_code": 1},
+            {"exit_code": False},
+        ):
             with self.subTest(patch_value=patch_value):
                 self.assertIsNone(self.find({**self.result, **patch_value}))
 
     def test_waiter_rejects_other_worker_container_and_author(self):
-        for patch_value in ({"worker": "blue"}, {"docker": "vllm_hccl_smoke"}, {"repo": "other/repo"}):
+        for patch_value in (
+            {"worker": "blue"},
+            {"docker": "vllm_hccl_smoke"},
+            {"repo": "other/repo"},
+        ):
             with self.subTest(patch_value=patch_value):
                 self.assertIsNone(self.find({**self.result, **patch_value}))
         self.assertIsNone(self.find(copy.deepcopy(self.result), author="other"))
